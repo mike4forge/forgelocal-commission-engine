@@ -4,14 +4,19 @@
 // send a Supabase auth token, so leaving JWT on returns 401 and the webhook fails.
 //
 // Events handled (start in Stripe TEST mode):
-//   checkout.session.completed (mode=payment) -> setup cash_event   (one-time fees)
-//   invoice.paid                              -> monthly cash_event (subscriptions)
-//   charge.refunded                           -> refund cash_event  (clawback)
+//   checkout.session.completed (mode=payment)      -> setup cash_event   (one-time fees)
+//   checkout.session.completed (mode=subscription) -> stamps the GHL id onto the
+//                                                     subscription so monthly charges match
+//   invoice.paid                                   -> monthly cash_event (subscriptions)
+//   charge.refunded                                -> refund cash_event  (clawback)
 //
-// Attribution: each Stripe payment is matched to a deal via metadata —
-// metadata.ghl_opportunity_id (preferred) or metadata.deal_id. If neither is
-// present, the cash_event is recorded WITHOUT a deal and not calculated; it waits
-// for manual linking. We never silently drop a payment.
+// Attribution (how a payment finds its deal):
+//   The closing app appends the GHL OPPORTUNITY id to the Stripe Payment Link as
+//   ?client_reference_id=<ghl_opportunity_id>. The webhook reads that, falling back
+//   to metadata.ghl_opportunity_id, then metadata.deal_id. It looks up the matching
+//   row in `deals` (ghl_opportunity_id) and attributes commission to that closer.
+//   If nothing matches, the cash_event is recorded WITHOUT a deal and not calculated;
+//   it waits for manual linking. We never silently drop a payment.
 //
 // Secrets required (set in Supabase, not in code):
 //   STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SIGNING_SECRET
@@ -54,28 +59,41 @@ Deno.serve(async (req) => {
     switch (event.type) {
       case "checkout.session.completed": {
         const s = event.data.object as Stripe.Checkout.Session;
+        const oppId = s.client_reference_id
+          ?? (s.metadata?.ghl_opportunity_id as string | undefined)
+          ?? null;
+
         if (s.mode === "payment") {
+          // one-time setup fee
           await ingestPayment({
             eventId: event.id,
             basis: "setup",
             amountCents: s.amount_total ?? 0,
             currency: s.currency ?? "usd",
             occurredAt: new Date(event.created * 1000).toISOString(),
-            metadata: (s.metadata ?? {}) as Record<string, string>,
+            oppId,
+            dealUuid: (s.metadata?.deal_id as string | undefined) ?? null,
             raw: s,
           });
+        } else if (s.mode === "subscription" && s.subscription && oppId) {
+          // first charge is handled by invoice.paid; stamp the subscription so every
+          // future monthly invoice carries the GHL id and stays matched automatically.
+          const subId = typeof s.subscription === "string" ? s.subscription : s.subscription.id;
+          await stripe.subscriptions.update(subId, { metadata: { ghl_opportunity_id: oppId } });
         }
         break;
       }
       case "invoice.paid": {
         const inv = event.data.object as Stripe.Invoice;
+        const oppId = await invoiceOppId(inv);
         await ingestPayment({
           eventId: event.id,
           basis: "monthly",
           amountCents: inv.amount_paid ?? 0,
           currency: inv.currency ?? "usd",
           occurredAt: new Date(event.created * 1000).toISOString(),
-          metadata: (inv.metadata ?? {}) as Record<string, string>,
+          oppId,
+          dealUuid: (inv.metadata?.deal_id as string | undefined) ?? null,
           raw: inv,
         });
         break;
@@ -90,7 +108,7 @@ Deno.serve(async (req) => {
           paymentIntent: typeof ch.payment_intent === "string"
             ? ch.payment_intent
             : (ch.payment_intent?.id ?? null),
-          metadata: (ch.metadata ?? {}) as Record<string, string>,
+          oppId: (ch.metadata?.ghl_opportunity_id as string | undefined) ?? null,
           raw: ch,
         });
         break;
@@ -104,12 +122,29 @@ Deno.serve(async (req) => {
   }
 });
 
-async function resolveDealId(metadata: Record<string, string>): Promise<string | null> {
-  if (metadata.deal_id) return metadata.deal_id;
-  const opp = metadata.ghl_opportunity_id;
-  if (!opp) return null;
-  const { data } = await supabase.from("deals").select("id").eq("ghl_opportunity_id", opp).maybeSingle();
-  return data?.id ?? null;
+// Pull the GHL opportunity id off a subscription invoice (stamped at first charge).
+async function invoiceOppId(inv: Stripe.Invoice): Promise<string | null> {
+  const fromInvoice = (inv.subscription_details?.metadata?.ghl_opportunity_id
+    ?? inv.metadata?.ghl_opportunity_id) as string | undefined;
+  if (fromInvoice) return fromInvoice;
+  if (inv.subscription) {
+    const subId = typeof inv.subscription === "string" ? inv.subscription : inv.subscription.id;
+    const sub = await stripe.subscriptions.retrieve(subId);
+    return (sub.metadata?.ghl_opportunity_id as string | undefined) ?? null;
+  }
+  return null;
+}
+
+async function resolveDeal(oppId: string | null, dealUuid: string | null): Promise<string | null> {
+  if (oppId) {
+    const { data } = await supabase.from("deals").select("id").eq("ghl_opportunity_id", oppId).maybeSingle();
+    if (data) return data.id;
+  }
+  if (dealUuid) {
+    const { data } = await supabase.from("deals").select("id").eq("id", dealUuid).maybeSingle();
+    if (data) return data.id;
+  }
+  return null;
 }
 
 async function runCalc(cashEventId: string) {
@@ -123,10 +158,11 @@ async function ingestPayment(e: {
   amountCents: number;
   currency: string;
   occurredAt: string;
-  metadata: Record<string, string>;
+  oppId: string | null;
+  dealUuid: string | null;
   raw: unknown;
 }) {
-  const dealId = await resolveDealId(e.metadata);
+  const dealId = await resolveDeal(e.oppId, e.dealUuid);
   const { data, error } = await supabase.from("cash_events").insert({
     deal_id: dealId,
     stripe_event_id: e.eventId,
@@ -152,7 +188,7 @@ async function ingestRefund(e: {
   currency: string;
   occurredAt: string;
   paymentIntent: string | null;
-  metadata: Record<string, string>;
+  oppId: string | null;
   raw: unknown;
 }) {
   // Recover the original payment's deal + basis via its Stripe payment_intent.
@@ -167,7 +203,7 @@ async function ingestRefund(e: {
       .maybeSingle();
     if (data) { basis = data.basis as "setup" | "monthly"; dealId = data.deal_id; }
   }
-  if (!dealId) dealId = await resolveDealId(e.metadata);
+  if (!dealId) dealId = await resolveDeal(e.oppId, null);
 
   const { data, error } = await supabase.from("cash_events").insert({
     deal_id: dealId,
