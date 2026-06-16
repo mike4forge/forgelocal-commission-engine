@@ -1,0 +1,16 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# supabase local
+supabase/.temp/
+supabase/.branches/
+
+# os / editor
+.DS_Store
+Thumbs.db
+*.log
+
+# deps (for future edge functions)
+node_modules/
