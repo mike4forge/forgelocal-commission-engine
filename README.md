@@ -59,7 +59,7 @@ Copy `.env.example` to `.env` and fill in. Secrets come from env only.
 - [x] Schema (`supabase/migrations/20260616000000_init.sql`)
 - [x] Synthetic seed — Director → State → 2 Leads → 5 Reps + test deals (`supabase/seed.sql`)
 - [x] Calc service — `generate_commission()` + clawback + batch runner (`supabase/migrations/20260616000001_calc_service.sql`)
-- [x] Verification oracle with expected values (`supabase/verify.sql`)
+- [x] Verification oracle with expected values (`supabase/verify.sql`) — **verified on live Supabase 2026-06-16; all per-rep nets matched**
 - [ ] KPI/quota gate wiring — table exists (`override_eligibility`); quarterly GHL review thresholds TBD
 - [ ] Stripe webhook ingest → cash_events (calls `generate_commission`)
 - [ ] GoHighLevel deal sync
