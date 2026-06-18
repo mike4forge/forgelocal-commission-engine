@@ -60,7 +60,16 @@ Copy `.env.example` to `.env` and fill in. Secrets come from env only.
 - [x] Synthetic seed — Director → State → 2 Leads → 5 Reps + test deals (`supabase/seed.sql`)
 - [x] Calc service — `generate_commission()` + clawback + batch runner (`supabase/migrations/20260616000001_calc_service.sql`)
 - [x] Verification oracle with expected values (`supabase/verify.sql`) — **verified on live Supabase 2026-06-16; all per-rep nets matched**
+- [x] Stripe webhook ingest → cash_events (`supabase/functions/stripe-webhook`) — **deployed + tested end-to-end in Stripe test mode 2026-06-18**; attribution via `client_reference_id` = GHL opportunity id
 - [ ] KPI/quota gate wiring — table exists (`override_eligibility`); quarterly GHL review thresholds TBD
-- [ ] Stripe webhook ingest → cash_events (calls `generate_commission`)
-- [ ] GoHighLevel deal sync
+- [ ] GoHighLevel deal sync (Teo) — creates `deals` at BoldSign signing, keyed by GHL opportunity id
 - [ ] Payout batch builder + Ramp submit (human-gated)
+- [ ] **Pre-launch cleanup:** purge synthetic seed + test rows before real data goes in
+
+## Closing-funnel integration
+
+The rep's closing app carries the GHL **opportunity** id through the funnel
+(presentation → BoldSign contract → Stripe payment) and appends it to the Stripe
+Payment Link as `?client_reference_id=<opportunity_id>`. The webhook reads it and
+matches the payment to the `deals` row created at signing. Use the opportunity id,
+not the contact id — one customer can have multiple deals.
