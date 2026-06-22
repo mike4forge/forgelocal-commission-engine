@@ -63,7 +63,8 @@ Copy `.env.example` to `.env` and fill in. Secrets come from env only.
 - [x] Stripe webhook ingest → cash_events (`supabase/functions/stripe-webhook`) — **deployed + tested end-to-end in Stripe test mode 2026-06-18**; attribution via `client_reference_id` = GHL opportunity id
 - [ ] KPI/quota gate wiring — table exists (`override_eligibility`); quarterly GHL review thresholds TBD
 - [ ] GoHighLevel deal sync (Teo) — creates `deals` at BoldSign signing, keyed by GHL opportunity id
-- [ ] Payout batch builder + Ramp submit (human-gated)
+- [x] Payout batch builder + approval gate (`supabase/migrations/20260618000002_payout_batches.sql`) — **verified 2026-06-19**; nets per rep, pays net-positive only (clawbacks carry forward), human approval before anything sends
+- [ ] Ramp send step — all payees are **1099** (confirmed 2026-06-19), so Ramp pays everyone directly; needs each rep's `ramp_recipient_id` + the Ramp API call (W-2/payroll branch deferred until managers convert)
 - [ ] **Pre-launch cleanup:** purge synthetic seed + test rows before real data goes in
 
 ## Closing-funnel integration
